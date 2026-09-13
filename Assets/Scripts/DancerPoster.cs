@@ -9,13 +9,13 @@ using VRC.Udon.Common.Interfaces;
 public class DancerPoster : UdonSharpBehaviour
 {
     [Header("Poster Settings")]
-    [Tooltip("The Renderer whose material will be updated with the poster image.")]
+    [Tooltip("The Renderer whose material will receive the downloaded image.")]
     public Renderer targetRenderer;
 
-    [Tooltip("Full URL to the manifest.txt file on GitHub Pages.")]
+    [Tooltip("Full URL to manifest.txt on GitHub Pages.")]
     public string manifestUrl = "https://skully5000.github.io/ClubElementum/Posters/Dancers/manifest.txt";
 
-    [Tooltip("Base URL for image files — must end with a forward slash.")]
+    [Tooltip("Base URL for images — must end with a forward slash.")]
     public string baseImageUrl = "https://skully5000.github.io/ClubElementum/Posters/Dancers/";
 
     [Tooltip("Seconds between each random poster change.")]
@@ -24,7 +24,6 @@ public class DancerPoster : UdonSharpBehaviour
     [Tooltip("Shader texture property name on the poster material.")]
     public string materialTextureName = "_MainTex";
 
-    // ── runtime state ──────────────────────────────────────────────────────────
     private string[] _imageNames;
     private VRCImageDownloader _imageDownloader;
     private int _lastIndex = -1;
@@ -35,70 +34,67 @@ public class DancerPoster : UdonSharpBehaviour
         VRCStringDownloader.LoadUrl(new VRCUrl(manifestUrl), (IUdonEventReceiver)this);
     }
 
-    // Called when manifest.txt finishes downloading
     public override void OnStringLoadSuccess(IVRCStringDownload result)
     {
         string raw = result.Result.Trim();
-
-        // Split on newlines (handles both \r\n and \n)
-        string[] lines = raw.Split('\n');
+        string[] lines = raw.Split(new char[] { '\n' });
 
         int count = 0;
         for (int i = 0; i < lines.Length; i++)
         {
-            string line = lines[i].Trim().Trim('\r');
-            if (line.Length > 0) count++;
+            if (lines[i].Trim().Length > 0) count++;
         }
 
         _imageNames = new string[count];
         int idx = 0;
         for (int i = 0; i < lines.Length; i++)
         {
-            string line = lines[i].Trim().Trim('\r');
+            string line = lines[i].Trim();
             if (line.Length > 0) _imageNames[idx++] = line;
         }
 
-        Debug.Log($"[DancerPoster] Loaded manifest with {_imageNames.Length} image(s).");
-
+        Debug.Log("[DancerPoster] Loaded " + _imageNames.Length + " image(s) from manifest.");
         LoadRandomImage();
-        SendCustomEventDelayedSeconds(nameof(ChangeImage), changeInterval);
+        SendCustomEventDelayedSeconds("ChangeImage", changeInterval);
     }
 
     public override void OnStringLoadError(IVRCStringDownload result)
     {
-        Debug.LogError($"[DancerPoster] Failed to load manifest: {result.Error}");
+        Debug.LogError("[DancerPoster] Failed to load manifest: " + result.Error);
     }
 
-    // Scheduled event — fires every changeInterval seconds
     public void ChangeImage()
     {
         LoadRandomImage();
-        SendCustomEventDelayedSeconds(nameof(ChangeImage), changeInterval);
+        SendCustomEventDelayedSeconds("ChangeImage", changeInterval);
     }
 
     private void LoadRandomImage()
     {
         if (_imageNames == null || _imageNames.Length == 0) return;
 
-        int pick;
+        int pick = 0;
         if (_imageNames.Length == 1)
         {
             pick = 0;
         }
         else
         {
-            do { pick = Random.Range(0, _imageNames.Length); }
-            while (pick == _lastIndex);
+            pick = Random.Range(0, _imageNames.Length);
+            int attempts = 0;
+            while (pick == _lastIndex && attempts < 10)
+            {
+                pick = Random.Range(0, _imageNames.Length);
+                attempts++;
+            }
         }
         _lastIndex = pick;
 
         string url = baseImageUrl + _imageNames[pick];
-        Debug.Log($"[DancerPoster] Loading image: {url}");
+        Debug.Log("[DancerPoster] Loading: " + url);
 
         TextureInfo texInfo = new TextureInfo();
         texInfo.GenerateMipMaps = true;
-        texInfo.WrapModeU = TextureWrapMode.Clamp;
-        texInfo.WrapModeV = TextureWrapMode.Clamp;
 
         _imageDownloader.DownloadImage(new VRCUrl(url), null, (IUdonEventReceiver)this, texInfo);
     }
@@ -115,6 +111,6 @@ public class DancerPoster : UdonSharpBehaviour
 
     public override void OnImageLoadError(IVRCImageDownload result)
     {
-        Debug.LogError($"[DancerPoster] Failed to load image: {result.Error}");
+        Debug.LogError("[DancerPoster] Failed to load image: " + result.Error);
     }
 }
