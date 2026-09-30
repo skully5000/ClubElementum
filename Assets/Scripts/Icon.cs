@@ -5,17 +5,17 @@ using VRC.SDKBase;
 using VRC.Udon.Common.Interfaces;
 
 [UdonBehaviourSyncMode(BehaviourSyncMode.None)]
-public class DancerIcon : UdonSharpBehaviour
+public class Icon : UdonSharpBehaviour
 {
     [Header("List Settings")]
-    [Tooltip("VRCUrl pointing to the raw dancerList file on GitHub.")]
+    [Tooltip("VRCUrl pointing to the name list on GitHub (e.g. dancerList, djList).")]
     public VRCUrl listUrl;
 
     [Tooltip("How often (seconds) to re-fetch the list from GitHub.")]
     public float refreshInterval = 60f;
 
     [Header("Icon Settings")]
-    [Tooltip("Pool of icon GameObjects — one per potential dancer in the world at once.")]
+    [Tooltip("Pool of icon GameObjects — one per listed player in the world at once.")]
     public GameObject[] iconPool;
 
     [Tooltip("Height offset above the player's head bone.")]
@@ -30,12 +30,12 @@ public class DancerIcon : UdonSharpBehaviour
     [Tooltip("Make icons face the local player each frame.")]
     public bool faceLocalPlayer = true;
 
-    private string[] _dancerNames;
+    private string[] _names;
     private VRCPlayerApi[] _trackedPlayers;
 
     void Start()
     {
-        _dancerNames = new string[0];
+        _names = new string[0];
         _trackedPlayers = new VRCPlayerApi[0];
         FetchList();
     }
@@ -62,25 +62,25 @@ public class DancerIcon : UdonSharpBehaviour
             if (lines[i].Trim().Length > 0) count++;
         }
 
-        _dancerNames = new string[count];
+        _names = new string[count];
         int idx = 0;
         for (int i = 0; i < lines.Length; i++)
         {
             string line = lines[i].Trim();
             if (line.Length > 0)
             {
-                _dancerNames[idx] = line;
+                _names[idx] = line;
                 idx++;
             }
         }
 
-        Debug.Log("[DancerIcon] Loaded " + _dancerNames.Length + " dancer(s).");
+        Debug.Log("[Icon] Loaded " + _names.Length + " name(s).");
         AssignIcons();
     }
 
     public override void OnStringLoadError(IVRCStringDownload result)
     {
-        Debug.LogError("[DancerIcon] Failed to load list: " + result.Error);
+        Debug.LogError("[Icon] Failed to load list: " + result.Error);
     }
 
     public override void OnPlayerJoined(VRCPlayerApi player)
@@ -100,7 +100,7 @@ public class DancerIcon : UdonSharpBehaviour
             iconPool[i].SetActive(false);
         }
 
-        if (_dancerNames == null || _dancerNames.Length == 0) return;
+        if (_names == null || _names.Length == 0) return;
 
         int playerCount = VRCPlayerApi.GetPlayerCount();
         VRCPlayerApi[] players = new VRCPlayerApi[playerCount];
@@ -175,9 +175,9 @@ public class DancerIcon : UdonSharpBehaviour
     private bool IsOnList(string playerName)
     {
         string lower = playerName.ToLower();
-        for (int i = 0; i < _dancerNames.Length; i++)
+        for (int i = 0; i < _names.Length; i++)
         {
-            if (_dancerNames[i].ToLower() == lower) return true;
+            if (_names[i].ToLower() == lower) return true;
         }
         return false;
     }

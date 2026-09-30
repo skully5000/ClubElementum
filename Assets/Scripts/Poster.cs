@@ -9,11 +9,14 @@ using UnityEditor;
 #endif
 
 [UdonBehaviourSyncMode(BehaviourSyncMode.None)]
-public class DancerPoster : UdonSharpBehaviour
+public class Poster : UdonSharpBehaviour
 {
     [Header("Poster Settings")]
     [Tooltip("The Renderer whose material will receive the downloaded image.")]
     public Renderer targetRenderer;
+
+    [Tooltip("Which material slot on the renderer shows the poster. PosterStand: 1 = front, 2 = back.")]
+    public int materialIndex = 0;
 
     [Tooltip("Pool of generic poster URLs (poster1..posterN). Fill via right-click > Generate URL Pool.")]
     public VRCUrl[] imageUrls;
@@ -26,6 +29,16 @@ public class DancerPoster : UdonSharpBehaviour
 
     [Tooltip("Shader texture property name on the poster material.")]
     public string materialTextureName = "_MainTex";
+
+    [Header("Transition")]
+    [Tooltip("Seconds to crossfade between posters. Requires the ClubElementum/PosterCrossfade shader. Set to 0 for an instant swap.")]
+    public float fadeDuration = 1.5f;
+
+    [Tooltip("Shader texture property that holds the incoming poster during a fade.")]
+    public string nextTextureName = "_NextTex";
+
+    [Tooltip("Shader float property (0..1) that blends from current to next poster.")]
+    public string blendPropertyName = "_Blend";
 
     [Header("URL Pool Generator (editor only)")]
     [Tooltip("Poster URL prefix — the pool index and extension are appended.")]
@@ -43,9 +56,33 @@ public class DancerPoster : UdonSharpBehaviour
     private int _posterCount = -1;
     private int _lastIndex = -1;
 
+    private Material _material;
+    private bool _fading;
+    private float _fadeTime;
+    private Texture2D _incomingTexture;
+    private VRCImageDownloader _incomingDownloader;
+
     void Start()
     {
+        if (targetRenderer != null)
+        {
+            // .materials returns this renderer's instanced materials, so two Poster
+            // components on one renderer (front/back) each get their own slot.
+            Material[] materials = targetRenderer.materials;
+            if (materialIndex >= 0 && materialIndex < materials.Length) _material = materials[materialIndex];
+            else Debug.LogError("[Poster] materialIndex " + materialIndex + " is out of range.");
+        }
         ChangeImage();
+    }
+
+    void Update()
+    {
+        if (!_fading) return;
+
+        _fadeTime += Time.deltaTime;
+        float t = Mathf.Clamp01(_fadeTime / fadeDuration);
+        _material.SetFloat(blendPropertyName, Mathf.SmoothStep(0f, 1f, t));
+        if (t >= 1f) FinishFade();
     }
 
     public void ChangeImage()
@@ -72,14 +109,14 @@ public class DancerPoster : UdonSharpBehaviour
         }
         else
         {
-            Debug.LogError("[DancerPoster] count.txt is not a number: " + result.Result);
+            Debug.LogError("[Poster] count.txt is not a number: " + result.Result);
         }
         LoadRandomImage();
     }
 
     public override void OnStringLoadError(IVRCStringDownload result)
     {
-        Debug.LogError("[DancerPoster] Failed to load poster count: " + result.Error);
+        Debug.LogError("[Poster] Failed to load poster count: " + result.Error);
         // Never loaded a count — fall back to the whole pool so something still shows.
         if (_posterCount < 0) _posterCount = imageUrls == null ? 0 : imageUrls.Length;
         LoadRandomImage();
@@ -113,27 +150,58 @@ public class DancerPoster : UdonSharpBehaviour
 
     public override void OnImageLoadSuccess(IVRCImageDownload result)
     {
-        if (targetRenderer == null)
+        if (_material == null)
         {
-            Debug.LogError("[DancerPoster] targetRenderer is not assigned!");
+            Debug.LogError("[Poster] targetRenderer is not assigned!");
             return;
         }
-        targetRenderer.material.SetTexture(materialTextureName, result.Result);
 
-        if (_activeDownloader != null) _activeDownloader.Dispose();
-        _activeDownloader = _pendingDownloader;
+        if (fadeDuration <= 0f)
+        {
+            _material.SetTexture(materialTextureName, result.Result);
+            if (_activeDownloader != null) _activeDownloader.Dispose();
+            _activeDownloader = _pendingDownloader;
+            _pendingDownloader = null;
+            return;
+        }
+
+        // A new image arrived mid-fade — snap the current fade to its end first.
+        if (_fading) FinishFade();
+
+        _incomingTexture = result.Result;
+        _incomingDownloader = _pendingDownloader;
         _pendingDownloader = null;
+
+        _material.SetTexture(nextTextureName, _incomingTexture);
+        _material.SetFloat(blendPropertyName, 0f);
+        _fadeTime = 0f;
+        _fading = true;
+    }
+
+    private void FinishFade()
+    {
+        // Promote the incoming poster to current and reset the blend in the same frame.
+        _material.SetTexture(materialTextureName, _incomingTexture);
+        _material.SetFloat(blendPropertyName, 0f);
+        _fading = false;
+
+        // The old texture is no longer displayed, so it's safe to free now.
+        if (_activeDownloader != null) _activeDownloader.Dispose();
+        _activeDownloader = _incomingDownloader;
+        _incomingDownloader = null;
+        _incomingTexture = null;
     }
 
     public override void OnImageLoadError(IVRCImageDownload result)
     {
-        Debug.LogError("[DancerPoster] Failed to load image: " + result.Error);
+        Debug.LogError("[Poster] Failed to load image: " + result.Error);
     }
 
     void OnDestroy()
     {
         if (_activeDownloader != null) _activeDownloader.Dispose();
         if (_pendingDownloader != null) _pendingDownloader.Dispose();
+        if (_incomingDownloader != null) _incomingDownloader.Dispose();
     }
 
 #if !COMPILER_UDONSHARP && UNITY_EDITOR
@@ -148,7 +216,7 @@ public class DancerPoster : UdonSharpBehaviour
         }
         countUrl = new VRCUrl(countFileUrl);
         EditorUtility.SetDirty(this);
-        Debug.Log("[DancerPoster] Generated " + poolSize + " poster URLs.");
+        Debug.Log("[Poster] Generated " + poolSize + " poster URLs.");
     }
 #endif
 }
