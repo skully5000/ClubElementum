@@ -27,6 +27,17 @@ public class Poster : UdonSharpBehaviour
     [Tooltip("Seconds between each random poster change.")]
     public float changeInterval = 30f;
 
+    [Tooltip("Up to this many extra random seconds are added to each interval, so posters drift out of sync.")]
+    public float intervalJitter = 5f;
+
+    [Tooltip("When on, Avoid Same As is filled in automatically (on Play and before each build) with every other Poster whose slot uses the same material. Turn off to set it by hand.")]
+    public bool autoLinkByMaterial = true;
+
+    [Tooltip("Other Poster components this one should avoid showing the same image as. Filled automatically when Auto Link By Material is on. If empty, uses the other Poster components on this GameObject.")]
+    public Poster[] avoidSameAs;
+
+    [HideInInspector] public int shownIndex = -1;
+
     [Tooltip("Shader texture property name on the poster material.")]
     public string materialTextureName = "_MainTex";
 
@@ -54,7 +65,10 @@ public class Poster : UdonSharpBehaviour
     private VRCImageDownloader _activeDownloader;
     private VRCImageDownloader _pendingDownloader;
     private int _posterCount = -1;
-    private int _lastIndex = -1;
+
+    // Shuffle bag: every poster is shown once in random order before any repeats.
+    private int[] _bag;
+    private int _bagPos;
 
     private Material _material;
     private bool _fading;
@@ -72,6 +86,20 @@ public class Poster : UdonSharpBehaviour
             if (materialIndex >= 0 && materialIndex < materials.Length) _material = materials[materialIndex];
             else Debug.LogError("[Poster] materialIndex " + materialIndex + " is out of range.");
         }
+
+        // No partners set: pair up with the other Poster components on this GameObject
+        // (IsShownByPartner skips this one).
+        if (avoidSameAs == null || avoidSameAs.Length == 0) avoidSameAs = GetComponents<Poster>();
+
+        // Unity's generator can start from the same state every launch, so seed it from the clock.
+        // Mixing in the current generator state and this object's identity keeps posters that
+        // start in the same frame from getting identical seeds.
+        int seed = (int)(System.DateTime.UtcNow.Ticks & 0x7FFFFFFF)
+            ^ Random.Range(int.MinValue, int.MaxValue)
+            ^ gameObject.name.GetHashCode()
+            ^ (materialIndex * 7919);
+        Random.InitState(seed);
+
         ChangeImage();
     }
 
@@ -97,7 +125,7 @@ public class Poster : UdonSharpBehaviour
             _posterCount = imageUrls == null ? 0 : imageUrls.Length;
             LoadRandomImage();
         }
-        SendCustomEventDelayedSeconds("ChangeImage", changeInterval);
+        SendCustomEventDelayedSeconds("ChangeImage", changeInterval + Random.Range(0f, Mathf.Max(0f, intervalJitter)));
     }
 
     public override void OnStringLoadSuccess(IVRCStringDownload result)
@@ -126,18 +154,9 @@ public class Poster : UdonSharpBehaviour
     {
         if (_posterCount <= 0) return;
 
-        int pick = 0;
-        if (_posterCount > 1)
-        {
-            pick = Random.Range(0, _posterCount);
-            int attempts = 0;
-            while (pick == _lastIndex && attempts < 10)
-            {
-                pick = Random.Range(0, _posterCount);
-                attempts++;
-            }
-        }
-        _lastIndex = pick;
+        int pick = PickNext();
+        if (pick == shownIndex && _material != null && _activeDownloader != null) return; // only one poster exists
+        shownIndex = pick;
 
         TextureInfo texInfo = new TextureInfo();
         texInfo.GenerateMipMaps = true;
@@ -146,6 +165,57 @@ public class Poster : UdonSharpBehaviour
         if (_pendingDownloader != null) _pendingDownloader.Dispose();
         _pendingDownloader = new VRCImageDownloader();
         _pendingDownloader.DownloadImage(imageUrls[pick], null, (IUdonEventReceiver)this, texInfo);
+    }
+
+    private int PickNext()
+    {
+        if (_bag == null || _bag.Length != _posterCount || _bagPos >= _bag.Length) RefillBag();
+
+        // Prefer the next bag entry that isn't on screen here or on a partner poster.
+        // With very few posters that may be impossible, so settle for anything that at
+        // least changes this poster (otherwise both sides could get stuck forever).
+        int chosen = -1;
+        for (int i = _bagPos; i < _bag.Length && chosen < 0; i++)
+        {
+            if (_bag[i] != shownIndex && !IsShownByPartner(_bag[i])) chosen = i;
+        }
+        for (int i = _bagPos; i < _bag.Length && chosen < 0; i++)
+        {
+            if (_bag[i] != shownIndex) chosen = i;
+        }
+        if (chosen < 0) chosen = _bagPos;
+
+        int pick = _bag[chosen];
+        _bag[chosen] = _bag[_bagPos];
+        _bag[_bagPos] = pick;
+        _bagPos++;
+        return pick;
+    }
+
+    private void RefillBag()
+    {
+        _bag = new int[_posterCount];
+        for (int i = 0; i < _posterCount; i++) _bag[i] = i;
+
+        // Fisher–Yates shuffle.
+        for (int i = _posterCount - 1; i > 0; i--)
+        {
+            int j = Random.Range(0, i + 1);
+            int tmp = _bag[i];
+            _bag[i] = _bag[j];
+            _bag[j] = tmp;
+        }
+        _bagPos = 0;
+    }
+
+    private bool IsShownByPartner(int index)
+    {
+        if (avoidSameAs == null) return false;
+        for (int i = 0; i < avoidSameAs.Length; i++)
+        {
+            if (avoidSameAs[i] != null && avoidSameAs[i] != this && avoidSameAs[i].shownIndex == index) return true;
+        }
+        return false;
     }
 
     public override void OnImageLoadSuccess(IVRCImageDownload result)
