@@ -11,8 +11,9 @@ A poster is a 1440x3440 PNG built from the layered templates in `Posters/templat
 2. the person's avatar;
 3. the element foreground, a frame of leaves, flames and so on;
 4. the person's name, in gold lettering filled with the element's own artwork;
-5. the role title;
-6. the club logo.
+5. their quote, if they gave one, in smaller gold lettering under the name;
+6. the role title;
+7. the club logo.
 
 `Tools/make_poster.py` does all the compositing. Your job is the part a designer would do by hand: study the avatar, decide how to frame it, and check the result. The user cares about this. They want each poster to look composed for that person, not mechanically centred.
 
@@ -24,8 +25,10 @@ The user sends a block like this, with an image:
 Name: Rosebud
 Role: Dance Captain
 Element: Water
+Quote: "Be a friend, tell a friend something nice, it might change their life!"
 ```
 
+- **Quote:** optional. When there is one, pass it with `--quote`; see "Quotes".
 - **The image:** in Claude Code, an attached image appears as `[Image: source: <path>]`; use that path. If there's no file path, ask the user to save the image and give you the path.
 - **Several blocks:** make one poster per block.
 - **Elements:** water, fire, earth, wind ("air" means wind).
@@ -72,7 +75,7 @@ Then choose a scale and a placement using the guidance under "Framing". For each
 
 ```
 py -3 Tools/make_poster.py --avatar <image> --name "<Name>" --role "<Role>" --element <element> \
-    --scale S --focus FX,FY --at PX,PY --preview <scratch>/preview.png
+    --scale S --focus FX,FY --at PX,PY [--quote "<quote>"] --preview <scratch>/preview.png
 ```
 
 - `--focus` is a point on the avatar, in avatar pixels read from the grid. Use the main face, or the midpoint between faces for a group.
@@ -83,7 +86,7 @@ The output goes to `Posters/AI/<role>-<name>.png`. That name is plain ASCII, low
 
 ### 4. Check, then fix
 
-**Read the script's output.** Fix any `warning: … cut-off … edge shows` before showing the poster; see "Cut-off edges". The one accepted exception is a flat top edge through a cropped head. The "enlarged … may look soft" warning just goes in your report.
+**Read the script's output.** Fix any `warning: … cut-off … edge shows` before showing the poster; see "Cut-off edges". The one accepted exception is a flat top edge through a cropped head. The "enlarged … may look soft" warning just goes in your report. If the quote line says `name raised Npx`, the name now sits that much higher; check faces against it again.
 
 **View the preview.** It is half size, so poster coordinates are twice what you see. It shows:
 - the title band in magenta;
@@ -109,7 +112,7 @@ Re-render with adjusted numbers until it looks right. Rendering is quick, a few 
 Keep the report short:
 - a link to the poster;
 - a sentence or two on the framing choices;
-- anything the user should know: a softness warning, a name drawn with substitute letters, or a cut edge you couldn't hide.
+- anything the user should know: a softness warning, a name drawn with substitute letters, a cut edge you couldn't hide, a name raised to fit the quote, or any change to the quote's wording.
 
 Then invite tweaks. When the user says something like "a bit bigger and higher", re-render the same poster with adjusted `--scale` and `--at`. It overwrites the same file.
 
@@ -145,6 +148,7 @@ These come from posters the user approved or corrected. When they pull against e
 | Open window in the foreground | roughly x 200–1250 from y 800 to 2400; narrows to about x 500–1050 near y 2800; closes completely around y 3100–3130. The preview outlines it exactly. |
 | Name | centred, capitals about y 2490–2710; long names shrink or wrap onto two lines |
 | Gold rule (divider) | under the name: about y 2770–2810 for one line and about y 2840 for two; the script prints the exact y |
+| Quote | centred under the gold rule, ending by y 2886, just above the logo's top (y 2896). A long quote raises the name, rule and quote together, by up to 160px. |
 | Logo | bottom left, x 35–603, y 2894–3419 |
 
 Each element's foreground has its own quirks to check against faces:
@@ -171,6 +175,14 @@ A flat top edge through a cropped head is the exception. Don't hide it by pushin
 - **Look-alike letters:** display names often use Cyrillic or Greek letters that imitate Latin ones. The script draws and files these as Latin: "Jаcїпта" is drawn JACÏNTA and saved as `dancer-jacinta.png`. Tell the user when that happens.
 - **Undrawable characters:** if the script fails on a character, such as an emoji, ask the user how they want it written, or pass `--display-name` with a version the font can draw.
 
+## Quotes
+
+- **Placement:** the quote goes centred under the gold rule, above the logo, in gold Playfair Display with a dark outline and the element's glow. On 2026-10-15 the user chose this over a block in the bottom-right corner beside the logo: in the world the posters are larger than a person, so a line under the name reads well.
+- **Fitting is automatic.** The script picks the size, from 52px down to 40px, and breaks the quote over up to three lines, preferring breaks after punctuation. A quote that doesn't fit between the rule and the logo raises the name by up to 160px. This happens with a two-line quote under a short, large name, or with any quote under a two-line name. When it does, recheck faces; the yellow name zone in the preview moves up to match. If the script says the quote is too long, ask the user for a shorter version. Don't cut it yourself.
+- **Wording:** pass the user's words as given, with or without quote marks. The script adds curly quote marks and curls apostrophes. Keep their spelling and slang: "monke" stays "monke". If the quote starts with a lower-case letter, capitalise it and mention that in the report; the user accepted "Don't worry…". Don't add or remove any other punctuation.
+- **Undrawable characters:** if the script stops on a character, such as an emoji, ask the user how they want the quote written.
+- Quotes need the default "element" name style.
+
 ## Script options
 
 | Option | Use |
@@ -182,6 +194,7 @@ A flat top edge through a cropped head is the exception. Don't hide it by pushin
 | `--preview P.png` | half-size copy with layout guides |
 | `--backlight` | soft element-coloured light behind a dark render |
 | `--display-name` | draw a different spelling of the name |
+| `--quote "…"` | add the person's quote under the name (element style only) |
 | `--name-style classic` | old flat lettering (not the default) |
 
 ## Leave alone

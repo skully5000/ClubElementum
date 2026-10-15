@@ -3,7 +3,7 @@
     py Tools/make_poster.py --avatar avatar.png --name "David" --role host --element water
 
 Layers, bottom to top (positions match Posters/templates/postertemplateMas.psd):
-element background, avatar, element foreground, name, role title, logo.
+element background, avatar, element foreground, name, quote, role title, logo.
 
 The avatar should be a cut-out PNG with transparency. It is pasted unchanged; only its size
 and position are chosen. Without framing options the avatar is centred under the title
@@ -15,14 +15,17 @@ group) and say where it goes:
 --focus is in avatar pixels, --at in poster pixels. --preview writes a half-size copy with the
 title, name, logo and foreground-window guides drawn on, for checking the composition.
 --bottom-on-rule puts a cut-off bottom edge of the avatar exactly on the gold rule under the
-name, where it is hidden. --inspect describes an avatar and writes a gridded copy of it for
-reading coordinates:
+name, where it is hidden. --quote "..." adds a quote in gold lettering under the gold rule; it is
+sized and line-broken to fit above the logo, and a long one lifts the name to make room.
+--inspect describes an avatar and writes a gridded copy of it for reading coordinates:
 
     py Tools/make_poster.py --avatar avatar.png --inspect grid.png
 
 Needs Pillow (pip install pillow). Output: Posters/AI/<role>-<name>.png (1440 x 3440).
 """
 import argparse
+import itertools
+import math
 import os
 import re
 import sys
@@ -127,6 +130,17 @@ HOMOGLYPHS = dict(zip(
 
 RULE_GAP = 0.32            # gold rule sits this many font sizes below the last baseline
 
+# Quote: centred lines between the gold rule and the logo, in the name's gold with an element glow.
+QUOTE_FONT = ("PlayfairDisplay-Variable.ttf", "SemiBold")
+QUOTE_SIZES = range(52, 39, -1)  # preferred size first, smallest allowed last
+QUOTE_MAX_WIDTH = 1240
+QUOTE_MAX_LINES = 3
+QUOTE_LEADING = 1.22
+QUOTE_GAP = 0.3            # quote starts this many name font sizes below the rule, clear of the gems
+QUOTE_FLOOR = 2886         # lowest ink, just above the logo (its top is y 2896 at the highest)
+QUOTE_MAX_LIFT = 160       # a long quote may raise the name by up to this much to make room
+QUOTE_LIFT_COST = 0.25     # when choosing a layout, 4px of lift weigh the same as 1px of font size
+
 GOLD_STOPS = [(0.0, (255, 250, 215)), (0.3, (255, 220, 110)), (0.5, (214, 150, 45)),
               (0.62, (248, 196, 80)), (1.0, (255, 238, 165))]
 DARK = (30, 15, 0)
@@ -146,8 +160,8 @@ def slug(text):
     return re.sub(r"[^a-z0-9]+", "-", plain.lower()).strip("-")
 
 
-def drawable(name, font_file):
-    """The name as the font can draw it: look-alike letters swapped for Latin ones."""
+def drawable(text, font_file, what="name", fix="use --display-name to give a version it can"):
+    """The text as the font can draw it: look-alike letters swapped for Latin ones."""
     font = ImageFont.truetype(os.path.join(FONTS, font_file), 60)
 
     def ink(c):
@@ -156,10 +170,10 @@ def drawable(name, font_file):
         return im.tobytes(), font.getlength(c)
     missing = ink("􏿽")
     has = lambda c: c.isspace() or ink(c) != missing
-    shown = "".join(c if has(c) else HOMOGLYPHS.get(c, c) for c in name)
+    shown = "".join(c if has(c) else HOMOGLYPHS.get(c, c) for c in text)
     bad = sorted({c for c in shown if not has(c)})
     if bad:
-        fail(f"the name font can't draw {' '.join(bad)}; use --display-name to give a version it can")
+        fail(f"the {what} font can't draw {' '.join(bad)}; {fix}")
     return shown
 
 
@@ -512,11 +526,11 @@ def rule_y_for(name):
     return round(baselines_for(lines, font, style["cap_center_y"])[-1] + font.size * RULE_GAP)
 
 
-def draw_name_element(canvas, name, element):
+def draw_name_element(canvas, name, element, lift=0):
     style, look = NAME_STYLES["element"], ELEMENT_LOOK[element]
     lines, font = layout_name(name, style)
     size, cap = font.size, font.cap
-    baselines = baselines_for(lines, font, style["cap_center_y"])
+    baselines = baselines_for(lines, font, style["cap_center_y"] - lift)
     top = int(baselines[0] - size * 1.1)
     region = (W, int(baselines[-1] + size * 0.75) - top)
 
@@ -559,6 +573,98 @@ def draw_name_element(canvas, name, element):
     divider(layer, W / 2, rule_y, half, size, look)
     canvas.alpha_composite(layer, (0, top))
     return lines, size, round(top + rule_y), (layer, (0, top))
+
+
+# --- Quote ------------------------------------------------------------------------------------
+
+def quote_font(size):
+    font = ImageFont.truetype(os.path.join(FONTS, QUOTE_FONT[0]), size)
+    font.set_variation_by_name(QUOTE_FONT[1].encode())
+    return font
+
+
+def quote_stroke(font):
+    return max(2, round(font.size / 22))
+
+
+def tidy_quote(text):
+    """Curly apostrophes and inner quotes, wrapped in curly quote marks (replacing any typed)."""
+    text = text.strip().strip("\"“”").strip().replace("'", "’")
+    parts = text.split('"')
+    inner = "".join(p + "“”"[i % 2] for i, p in enumerate(parts[:-1])) + parts[-1]
+    return f"“{inner}”"
+
+
+def wrap_quote(text, n, font):
+    """The best way to break text into n lines no wider than QUOTE_MAX_WIDTH, or None. Lines are
+    kept even, but a break after punctuation is worth about seven characters of unevenness."""
+    words = text.split()
+    best = None
+    for cuts in itertools.combinations(range(1, len(words)), n - 1):
+        ends = (0,) + cuts + (len(words),)
+        lines = [" ".join(words[i:j]) for i, j in zip(ends, ends[1:])]
+        widest = max(font.getlength(line) for line in lines)
+        if widest > QUOTE_MAX_WIDTH:
+            continue
+        score = widest - 3.5 * font.size * sum(line[-1] in ",;:.!?…—–" for line in lines[:-1])
+        if best is None or score < best[0]:
+            best = (score, lines)
+    return best and best[1]
+
+
+def quote_height(lines, font):
+    """Ink height from the top of the first line to the bottom of the last, outline included."""
+    stroke = quote_stroke(font)
+    top = font.getbbox(lines[0], anchor="ls", stroke_width=stroke)[1]
+    bottom = font.getbbox(lines[-1], anchor="ls", stroke_width=stroke)[3]
+    return (len(lines) - 1) * font.size * QUOTE_LEADING + bottom - top
+
+
+def layout_quote(text, room):
+    """Choose the size and line breaks. room is the height free under the rule with the name where
+    it is; anything taller lifts the name. Returns (lines, font, lift)."""
+    best = None
+    for size in QUOTE_SIZES:
+        font = quote_font(size)
+        lines = next(filter(None, (wrap_quote(text, n, font) for n in range(1, QUOTE_MAX_LINES + 1))), None)
+        if lines is None:
+            continue
+        lift = max(0, math.ceil(quote_height(lines, font) - room))
+        cost = QUOTE_SIZES[0] - size + lift * QUOTE_LIFT_COST
+        if lift <= QUOTE_MAX_LIFT and (best is None or cost < best[0]):
+            best = (cost, lines, font, lift)
+    if best is None:
+        fail(f"the quote is too long to fit under the name, even on {QUOTE_MAX_LINES} lines at "
+             f"{QUOTE_SIZES[-1]}px; it needs shortening")
+    return best[1:]
+
+
+def draw_quote(canvas, lines, font, top, element):
+    """Centred gold lines whose ink starts at y=top, with a dark outline, the element glow and a
+    soft dark backing so they stay readable over busy foliage."""
+    size, look, stroke = font.size, ELEMENT_LOOK[element], quote_stroke(font)
+    first = top - font.getbbox(lines[0], anchor="ls", stroke_width=stroke)[1]
+    baselines = [first + i * size * QUOTE_LEADING for i in range(len(lines))]
+    pad = size * 2
+    y0 = int(top) - pad
+    region = (W, int(baselines[-1]) + pad - y0)
+    body, outline = Image.new("L", region, 0), Image.new("L", region, 0)
+    for mask, width in ((body, 0), (outline, stroke)):
+        d = ImageDraw.Draw(mask)
+        for line, base in zip(lines, baselines):
+            d.text((W / 2, base - y0), line, font=font, anchor="ms", fill=255,
+                   stroke_width=width, stroke_fill=255)
+
+    layer = Image.new("RGBA", region, (0, 0, 0, 0))
+    layer.alpha_composite(glow(outline, (0, 0, 0), 0.5, spread=0, blur=size * 0.6, range_=0.2))
+    layer.alpha_composite(glow(outline, (0, 0, 0), 0.85, spread=0, blur=size * 0.06, range_=0.5),
+                          (0, round(size * 0.06)))
+    layer.alpha_composite(glow(outline, look["glow"], 0.75, spread=0, blur=size * 0.18, range_=0.5))
+    layer.paste(DARK, (0, 0), outline)
+    cap = cap_height(font)
+    bands = [(b - cap - y0, b - y0) for b in baselines]
+    layer.paste(gradient_column(region[1], bands, GOLD_STOPS).resize(region), (0, 0), body)
+    canvas.alpha_composite(layer, (0, y0))
 
 
 # --- Inspect ----------------------------------------------------------------------------------
@@ -614,12 +720,12 @@ def inspect(path, grid_path):
 
 # --- Preview ----------------------------------------------------------------------------------
 
-def save_preview(poster, path, element, at):
+def save_preview(poster, path, element, at, lift=0):
     """Half-size copy with guides: title band, name zone, logo, foreground window, focus point."""
     over = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     d = ImageDraw.Draw(over)
     d.rectangle((0, 0, W, TITLE_BAND), fill=(255, 0, 255, 45))
-    d.rectangle((0, 2450, W, 2850), fill=(255, 255, 0, 35))
+    d.rectangle((0, 2450 - lift, W, 2850), fill=(255, 255, 0, 35))
     d.rectangle(LOGO_BOX, fill=(0, 255, 255, 50))
     window = template(f"{element}_foreground_1440x3440.png").getchannel("A").point(lambda v: 255 if v < 60 else 0)
     edge = window.filter(ImageFilter.FIND_EDGES).filter(ImageFilter.MaxFilter(5))
@@ -649,6 +755,7 @@ def main():
     p.add_argument("--backlight", action="store_true",
                    help="soft element-coloured light behind the avatar, for dark renders")
     p.add_argument("--display-name", help="the name as drawn, if it differs from --name")
+    p.add_argument("--quote", help="a quote to show under the name (element name style)")
     p.add_argument("--name-style", choices=sorted(NAME_STYLES), default="element")
     p.add_argument("--name-color", help="classic style only: name colour as #RRGGBB")
     p.add_argument("--preview", help="also write a half-size preview with layout guides here")
@@ -687,11 +794,19 @@ def main():
         else:
             at = point(a.at, "--at")
     shown = drawable(a.display_name or a.name, NAME_STYLES[a.name_style]["font"])
+    quote, lift = None, 0
+    if a.quote:
+        if a.name_style != "element":
+            fail("--quote needs the element name style (it sits under the gold rule)")
+        text = drawable(tidy_quote(a.quote), QUOTE_FONT[0], "quote", "reword the quote without it")
+        quote_top = rule_y_for(shown) + layout_name(shown, NAME_STYLES["element"])[1].size * QUOTE_GAP
+        lines, font, lift = layout_quote(text, QUOTE_FLOOR - quote_top)
+        quote = (lines, font, quote_top - lift)
     if a.bottom_on_rule:
         if a.name_style != "element":
             fail("--bottom-on-rule needs the element name style (classic has no rule)")
         # Place the avatar's last row exactly on the rule.
-        top = rule_y_for(shown) - round(avatar.height * scale) + 1
+        top = rule_y_for(shown) - lift - round(avatar.height * scale) + 1
         at = (at[0], top + focus[1] * scale)
 
     canvas = template(f"{element}_background_1440x3440.png")
@@ -702,7 +817,9 @@ def main():
     if a.name_style == "classic":
         lines, size, rule_y, name_layer = draw_name_classic(canvas, shown, element, color)
     else:
-        lines, size, rule_y, name_layer = draw_name_element(canvas, shown, element)
+        lines, size, rule_y, name_layer = draw_name_element(canvas, shown, element, lift)
+    if quote:
+        draw_quote(canvas, *quote, element)
     covers = [(foreground, (0, 0)), name_layer, place_title(canvas, title), place_logo(canvas)]
     cut_edges = visible_cut_edges(*placed, covers)
 
@@ -720,9 +837,12 @@ def main():
     print(f"  name: {' / '.join(lines)} at {size:.0f}px ({a.name_style})"
           + (f", gold rule under it at y={rule_y} (a cut-off avatar edge placed there is hidden)"
              if rule_y else ""))
+    if quote:
+        print(f"  quote: {' / '.join(quote[0])} at {quote[1].size}px on {len(quote[0])} line(s)"
+              + (f"; name raised {lift}px to make room" if lift else ""))
     print(f"  title: {os.path.relpath(title, REPO)}")
     if a.preview:
-        save_preview(canvas, a.preview, element, at)
+        save_preview(canvas, a.preview, element, at, lift)
         print(f"  preview: {a.preview}")
 
 
