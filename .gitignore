@@ -3,3 +3,4 @@
 __pycache__/
 # Photoshop source files are too large for GitHub (100 MB limit)
 *.psd
+Posters/templates/postertemplateMaster
