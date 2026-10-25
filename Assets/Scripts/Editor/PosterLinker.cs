@@ -79,8 +79,18 @@ public class PosterLinker : IVRCSDKBuildRequestedCallback
     public static void RegenerateUrlPools()
     {
         Poster[] posters = Object.FindObjectsOfType<Poster>(true);
-        foreach (Poster poster in posters) poster.GenerateUrlPool();
-        Debug.Log($"[Poster] Regenerated URL pools on {posters.Length} posters.");
+        int changed = 0;
+        foreach (Poster poster in posters)
+        {
+            string before = poster.imageUrls != null && poster.imageUrls.Length > 0 ? poster.imageUrls[0].Get() : "";
+            poster.GenerateUrlPool();
+            if (poster.imageUrls.Length > 0 && poster.imageUrls[0].Get() != before) changed++;
+        }
+
+        // Each Poster's own Image Extension is used, so show what came out; if nothing changed,
+        // the extension (usually set on the prefab) is probably still the old one.
+        string example = posters.Length > 0 && posters[0].imageUrls.Length > 0 ? posters[0].imageUrls[0].Get() : "none";
+        Debug.Log($"[Poster] Regenerated URL pools on {posters.Length} posters, {changed} changed. First URL: {example}");
     }
 
     /// <summary>
