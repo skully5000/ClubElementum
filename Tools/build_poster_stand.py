@@ -464,12 +464,13 @@ def main():
     if "--preview" in sys.argv:
         out = sys.argv[sys.argv.index("--preview") + 1]
         os.makedirs(out, exist_ok=True)
-        served = os.path.join(REPO, "Posters", "served")
+        # Served posters are JPG, which read_png can't decode, so preview with the first two
+        # PNG originals instead (same aspect ratio, just larger).
+        originals = os.path.join(REPO, "Posters", "originals")
+        pngs = sorted(n for n in os.listdir(originals) if n.lower().endswith(".png"))
         textures = {}
-        for mat, name in ((MAT_FRONT, "poster1.png"), (MAT_BACK, "poster2.png")):
-            p = os.path.join(served, name)
-            if os.path.exists(p):
-                textures[mat] = read_png(p)
+        for mat, name in zip((MAT_FRONT, MAT_BACK), pngs):
+            textures[mat] = read_png(os.path.join(originals, name))
         render(mesh, fn, textures, (0, 0, 1), os.path.join(out, "stand_front.png"))
         render(mesh, fn, textures, (0, 0, -1), os.path.join(out, "stand_back.png"))
         render(mesh, fn, textures, (0.55, -0.25, 1), os.path.join(out, "stand_angle.png"))

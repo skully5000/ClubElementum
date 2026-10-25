@@ -63,6 +63,18 @@ public class PosterLinker : IVRCSDKBuildRequestedCallback
         Debug.Log($"[Poster] Linked posters by material: {summary}. {changed} updated.");
     }
 
+    /// <summary>
+    /// Runs Generate URL Pool on every Poster in the open scenes, for stands whose URLs were
+    /// generated in the scene and so no longer follow the prefab (e.g. after a format change).
+    /// </summary>
+    [MenuItem("Tools/Posters/Regenerate URL Pools")]
+    public static void RegenerateUrlPools()
+    {
+        Poster[] posters = Object.FindObjectsOfType<Poster>(true);
+        foreach (Poster poster in posters) poster.GenerateUrlPool();
+        Debug.Log($"[Poster] Regenerated URL pools on {posters.Length} posters.");
+    }
+
     private static Material GetSlotMaterial(Poster poster)
     {
         if (poster.targetRenderer == null) return null;

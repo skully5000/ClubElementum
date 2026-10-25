@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'Posters/originals/**'
+      - '.github/workflows/build-posters.yml'
   workflow_dispatch:
 
 env:
@@ -49,8 +50,13 @@ jobs:
             if [ "$i" -ge "$POOL_SIZE" ]; then break; fi
             i=$((i + 1))
             # Fit within 2048x2048 (VRChat image loader limit), keeping aspect ratio; only shrink.
-            convert "$src" -resize '2048x2048>' -strip "$OUT_DIR/poster$i.png"
-            echo "poster$i.png <- $(basename "$src") ($(identify -format '%wx%h' "$OUT_DIR/poster$i.png"))"
+            # JPG at quality 90 is about a fifth of the PNG size with no visible difference, which
+            # matters because every player downloads every poster. JPG has no transparency, so
+            # flatten any onto black.
+            convert "$src" -resize '2048x2048>' -strip \
+              -background black -alpha remove -alpha off \
+              -sampling-factor 4:2:0 -quality 90 "$OUT_DIR/poster$i.jpg"
+            echo "poster$i.jpg <- $(basename "$src") ($(identify -format '%wx%h, %b' "$OUT_DIR/poster$i.jpg"))"
           done
 
           printf '%s' "$i" > "$OUT_DIR/count.txt"
