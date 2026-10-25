@@ -1,6 +1,5 @@
 using UdonSharp;
 using UnityEngine;
-using VRC.SDK3.Image;
 using VRC.SDK3.StringLoading;
 using VRC.SDKBase;
 using VRC.Udon.Common.Interfaces;
@@ -9,9 +8,10 @@ using UnityEditor;
 #endif
 
 // The object's owner (the instance master by default) picks each poster a full interval ahead
-// and syncs it with the server time it should appear. Every client downloads it early and swaps
-// at that time, so VRChat's image queue (one download per 5 s, served in random order) can't
-// leave one player behind. Late joiners get the current and upcoming posters on join.
+// and syncs it with the server time it should appear. Every client asks the shared PosterCache
+// for it early and swaps at that time, so nobody is left behind waiting on a download. Late
+// joiners get the current and upcoming posters on join. Images come from PosterCache, which
+// downloads each one once per visit and shares it between posters.
 [UdonBehaviourSyncMode(BehaviourSyncMode.Manual)]
 public class Poster : UdonSharpBehaviour
 {
@@ -28,14 +28,11 @@ public class Poster : UdonSharpBehaviour
     [Tooltip("VRCUrl pointing to served/count.txt — the number of posters that actually exist.")]
     public VRCUrl countUrl;
 
-    [Tooltip("Seconds between each random poster change. VRChat downloads at most 12 images a minute per player for the whole world, so keep (poster faces x 60 / this) at about 6 or less. Linked posters also stay 6 s apart, which stretches this when there are many.")]
+    [Tooltip("Seconds between each random poster change. Images are cached after their first download, so this can be short; linked posters also stay 6 s apart, which stretches it when there are many.")]
     public float changeInterval = 30f;
 
     [Tooltip("Up to this many extra random seconds are added to each interval, so posters drift out of sync.")]
     public float intervalJitter = 5f;
-
-    [Tooltip("Seconds to wait before retrying a poster image that failed to download.")]
-    public float retryDelay = 10f;
 
     [Tooltip("When on, Avoid Same As is filled in automatically (on Play and before each build) with every other Poster whose slot uses the same material. Turn off to set it by hand.")]
     public bool autoLinkByMaterial = true;
@@ -43,12 +40,22 @@ public class Poster : UdonSharpBehaviour
     [Tooltip("Other Poster components this one should avoid showing the same image as. Filled automatically when Auto Link By Material is on. If empty, uses the other Poster components on this GameObject.")]
     public Poster[] avoidSameAs;
 
+    [Tooltip("The PosterCache that downloads images and shares them between posters. Added and filled in automatically on Play and before each build.")]
+    public PosterCache cache;
+
     // Synced: the poster up now, the one replacing it, and when the swap happens (server time
     // in ms). currentIndex stays -1 until the owner's first pick. Partners read all three.
     [UdonSynced, HideInInspector] public int currentIndex = -1;
     [UdonSynced, HideInInspector] public int nextIndex = -1;
     [UdonSynced, HideInInspector] public int switchAt;
-    [UdonSynced] private int _syncedCount; // lets a new owner keep picking before it loads count.txt
+    // The poster count, so a new owner can keep picking before it loads count.txt and
+    // PosterCache knows how many to download ahead of time.
+    [UdonSynced, HideInInspector] public int syncedCount;
+
+    // Read by PosterCache so it never frees an image that's on screen or about to be.
+    [HideInInspector] public int shownIndex = -1;      // poster that should be on screen (may still be downloading)
+    [HideInInspector] public int displayedIndex = -1;  // poster actually on the material
+    [HideInInspector] public int fadingFromIndex = -1; // poster fading out during a crossfade
 
     [Tooltip("Shader texture property name on the poster material.")]
     public string materialTextureName = "_MainTex";
@@ -64,7 +71,7 @@ public class Poster : UdonSharpBehaviour
     public string blendPropertyName = "_Blend";
 
     [Header("Debug")]
-    [Tooltip("Write each pick, sync update and download to the VRChat log (output_log), for troubleshooting.")]
+    [Tooltip("Write each pick, sync update and swap to the VRChat log (output_log), for troubleshooting. PosterCache logs the downloads.")]
     public bool debugLogging = true;
 
     [Header("URL Pool Generator (editor only)")]
@@ -82,8 +89,6 @@ public class Poster : UdonSharpBehaviour
     // so linked posters swap at least this far apart to keep that queue from backing up.
     private const int SwapGapMs = 6000;
 
-    private VRCImageDownloader _activeDownloader;
-    private VRCImageDownloader _pendingDownloader;
     private int _posterCount = -1;
 
     // Shuffle bag: every poster is shown once in random order before any repeats.
@@ -94,15 +99,7 @@ public class Poster : UdonSharpBehaviour
     private bool _fading;
     private float _fadeTime;
     private Texture2D _incomingTexture;
-    private VRCImageDownloader _incomingDownloader;
-
-    private int _shownIndex = -1;    // poster on screen, or downloading to go on screen
-    private int _prefetchIndex = -1; // upcoming poster, downloading or held until its swap
-    private VRCImageDownloader _prefetchDownloader;
-    private Texture2D _prefetchTexture;
-    private float _retryAfter;
-    private float _pendingRequestedAt;
-    private float _prefetchRequestedAt;
+    private int _requestedNext = -1; // upcoming poster already asked of the cache
 
     void Start()
     {
@@ -127,6 +124,8 @@ public class Poster : UdonSharpBehaviour
             ^ gameObject.name.GetHashCode()
             ^ (materialIndex * 7919);
         Random.InitState(seed);
+
+        if (cache == null) Debug.LogError("[Poster] " + gameObject.name + " has no PosterCache. Enter Play mode or build once so it's added and linked automatically.");
 
         // The owner needs the count before its first pick; everyone else waits for the owner.
         bool owner = Networking.IsOwner(gameObject);
@@ -156,37 +155,36 @@ public class Poster : UdonSharpBehaviour
             if (t >= 1f) FinishFade();
         }
 
-        if (currentIndex < 0) return; // the owner hasn't picked anything yet
+        if (currentIndex < 0 || cache == null) return; // the owner hasn't picked anything yet
 
         // Compare by subtracting so this stays right when the millisecond server clock wraps.
         int now = Networking.GetServerTimeInMilliseconds();
         if (now - switchAt >= 0 && Networking.IsOwner(gameObject)) Advance(now);
         bool swapDue = now - switchAt >= 0;
 
-        if (Time.time < _retryAfter) return; // waiting out a failed download
-
         // Everyone works out what should be on screen from the synced state, so a late
         // or missed update corrects itself on the next frame.
         int target = swapDue ? nextIndex : currentIndex;
-        if (target != _shownIndex && IsValid(target)) Show(target);
+        if (target != shownIndex && IsValid(target)) Show(target, now);
 
-        // Fetch the upcoming poster once the one on screen has arrived, so a late joiner's
-        // current posters don't queue behind its upcoming ones.
-        if (!swapDue && _pendingDownloader == null && nextIndex != _prefetchIndex && nextIndex != _shownIndex && IsValid(nextIndex))
+        // Ask for the upcoming poster now so it's downloaded by its swap. The cache does
+        // nothing if it already has it, and fetches whatever is needed soonest first.
+        if (!swapDue && nextIndex != _requestedNext && IsValid(nextIndex))
         {
-            Prefetch(nextIndex);
+            _requestedNext = nextIndex;
+            cache.Request(nextIndex, switchAt);
         }
     }
 
     private void Advance(int now)
     {
-        if (_posterCount <= 0) _posterCount = Mathf.Min(_syncedCount, imageUrls == null ? 0 : imageUrls.Length);
+        if (_posterCount <= 0) _posterCount = Mathf.Min(syncedCount, imageUrls == null ? 0 : imageUrls.Length);
         if (_posterCount <= 0) return;
 
         currentIndex = nextIndex;
         nextIndex = PickNext();
         switchAt = SpacedFromPartners(now + NextDelayMs());
-        _syncedCount = _posterCount;
+        syncedCount = _posterCount;
         RequestSerialization();
         Log("picked: " + Describe());
 
@@ -201,7 +199,7 @@ public class Poster : UdonSharpBehaviour
         currentIndex = PickNext();
         nextIndex = PickNext();
         switchAt = SpacedFromPartners(Networking.GetServerTimeInMilliseconds() + NextDelayMs());
-        _syncedCount = _posterCount;
+        syncedCount = _posterCount;
         RequestSerialization();
         Log("first pick: " + Describe());
     }
@@ -277,51 +275,31 @@ public class Poster : UdonSharpBehaviour
         return index >= 0 && imageUrls != null && index < imageUrls.Length;
     }
 
-    private void Show(int index)
+    private void Show(int index, int now)
     {
-        _shownIndex = index;
+        shownIndex = index;
 
-        // Normally the poster was fetched ahead of its swap, so hand that download over.
-        if (index == _prefetchIndex)
+        // Normally the cache fetched it ahead of the swap.
+        Texture2D texture = cache.Get(index);
+        if (texture != null)
         {
-            Log("showing poster " + (index + 1) + (_prefetchTexture != null ? " (prefetched)" : " (prefetch still downloading)"));
-            if (_pendingDownloader != null) _pendingDownloader.Dispose();
-            _pendingDownloader = _prefetchDownloader;
-            _pendingRequestedAt = _prefetchRequestedAt;
-            Texture2D ready = _prefetchTexture;
-            _prefetchDownloader = null;
-            _prefetchTexture = null;
-            _prefetchIndex = -1;
-            if (ready != null) Display(ready); // otherwise OnImageLoadSuccess shows it on arrival
+            Log("showing poster " + (index + 1) + " (cached)");
+            Display(texture, index);
             return;
         }
 
-        // Late joiner, or the prefetch failed: fetch it now.
-        Log("showing poster " + (index + 1) + " (downloading now)");
-        if (_pendingDownloader != null) _pendingDownloader.Dispose();
-        _pendingDownloader = Download(index);
-        _pendingRequestedAt = Time.time;
+        // Late joiner, or the download is running late: it's needed right now.
+        Log("showing poster " + (index + 1) + " (waiting for download)");
+        cache.Request(index, now);
     }
 
-    private void Prefetch(int index)
+    // Called by PosterCache after each download. The image is passed in rather than fetched,
+    // because calling back into the cache from inside its own callback isn't safe in Udon.
+    public void _OnPosterCached(int index, Texture2D texture)
     {
-        Log("prefetching poster " + (index + 1));
-        if (_prefetchDownloader != null) _prefetchDownloader.Dispose();
-        _prefetchIndex = index;
-        _prefetchTexture = null;
-        _prefetchDownloader = Download(index);
-        _prefetchRequestedAt = Time.time;
-    }
-
-    private VRCImageDownloader Download(int index)
-    {
-        TextureInfo texInfo = new TextureInfo();
-        texInfo.GenerateMipMaps = true;
-
-        // Each poster gets its own downloader so its texture can be freed once it's replaced.
-        VRCImageDownloader downloader = new VRCImageDownloader();
-        downloader.DownloadImage(imageUrls[index], null, (IUdonEventReceiver)this, texInfo);
-        return downloader;
+        if (index != shownIndex || index == displayedIndex) return;
+        Log("poster " + (index + 1) + " arrived");
+        Display(texture, index);
     }
 
     private int PickNext()
@@ -376,25 +354,7 @@ public class Poster : UdonSharpBehaviour
         return false;
     }
 
-    public override void OnImageLoadSuccess(IVRCImageDownload result)
-    {
-        string url = result.Url.Get();
-        if (_prefetchIndex >= 0 && url == imageUrls[_prefetchIndex].Get())
-        {
-            Log("prefetched poster " + (_prefetchIndex + 1) + " after " + Seconds(Time.time - _prefetchRequestedAt) + "s; " + Describe());
-            _prefetchTexture = result.Result; // held until its swap time
-            return;
-        }
-        if (_shownIndex >= 0 && url == imageUrls[_shownIndex].Get())
-        {
-            Log("loaded poster " + (_shownIndex + 1) + " after " + Seconds(Time.time - _pendingRequestedAt) + "s");
-            Display(result.Result);
-            return;
-        }
-        Log("ignored a replaced download: " + url);
-    }
-
-    private void Display(Texture2D texture)
+    private void Display(Texture2D texture, int index)
     {
         if (_material == null)
         {
@@ -405,18 +365,16 @@ public class Poster : UdonSharpBehaviour
         if (fadeDuration <= 0f)
         {
             _material.SetTexture(materialTextureName, texture);
-            if (_activeDownloader != null) _activeDownloader.Dispose();
-            _activeDownloader = _pendingDownloader;
-            _pendingDownloader = null;
+            displayedIndex = index;
             return;
         }
 
         // A new image arrived mid-fade — snap the current fade to its end first.
         if (_fading) FinishFade();
 
+        fadingFromIndex = displayedIndex;
+        displayedIndex = index;
         _incomingTexture = texture;
-        _incomingDownloader = _pendingDownloader;
-        _pendingDownloader = null;
 
         _material.SetTexture(nextTextureName, _incomingTexture);
         _material.SetFloat(blendPropertyName, 0f);
@@ -430,33 +388,8 @@ public class Poster : UdonSharpBehaviour
         _material.SetTexture(materialTextureName, _incomingTexture);
         _material.SetFloat(blendPropertyName, 0f);
         _fading = false;
-
-        // The old texture is no longer displayed, so it's safe to free now.
-        if (_activeDownloader != null) _activeDownloader.Dispose();
-        _activeDownloader = _incomingDownloader;
-        _incomingDownloader = null;
         _incomingTexture = null;
-    }
-
-    public override void OnImageLoadError(IVRCImageDownload result)
-    {
-        // A download replaced before it arrived reports "Canceled" here; that's expected.
-        string url = result.Url.Get();
-        bool prefetch = _prefetchIndex >= 0 && url == imageUrls[_prefetchIndex].Get();
-        bool shown = !prefetch && _shownIndex >= 0 && url == imageUrls[_shownIndex].Get();
-        if (!prefetch && !shown)
-        {
-            Log("cancelled a replaced download: " + url);
-            return;
-        }
-
-        Debug.LogError("[Poster] " + gameObject.name + " failed to load " + url + ": "
-            + result.Error + " " + result.ErrorMessage);
-
-        // Forget the failed download so Update fetches it again once the retry delay has passed.
-        if (prefetch) _prefetchIndex = -1;
-        else _shownIndex = -1;
-        _retryAfter = Time.time + retryDelay;
+        fadingFromIndex = -1; // the old image is off screen, so PosterCache may free it
     }
 
     private void Log(string message)
@@ -479,14 +412,6 @@ public class Poster : UdonSharpBehaviour
     private float Seconds(float value)
     {
         return Mathf.Round(value * 10f) / 10f;
-    }
-
-    void OnDestroy()
-    {
-        if (_activeDownloader != null) _activeDownloader.Dispose();
-        if (_pendingDownloader != null) _pendingDownloader.Dispose();
-        if (_incomingDownloader != null) _incomingDownloader.Dispose();
-        if (_prefetchDownloader != null) _prefetchDownloader.Dispose();
     }
 
 #if !COMPILER_UDONSHARP && UNITY_EDITOR
